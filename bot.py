@@ -1,5 +1,5 @@
 """
-Telegram Shop Bot
+Telegram Shop Bot with Admin Panel
 Features:
 - Catalog browsing
 - Order placement with payment proof + social link
@@ -21,7 +21,7 @@ from telegram.ext import (
 )
 
 # ============ CONFIG ============
-BOT_TOKEN = "8291608976:AAEeii9LVk-fIGN9nkR7_7gBNPB-fhEDmjM"   # Replace with your bot token
+BOT_TOKEN = "8291608976:AAEeii9LVk-fIGN9nkR7_7gBNPB-fhEDmjM""   # Replace with your bot token
 ADMIN_ID = 7715257236                # Replace with your Telegram user ID
 DATA_FILE = "data.json"
 # ================================
@@ -73,6 +73,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(kb),
     )
 
+# ========== Catalog ==========
 async def catalog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -175,17 +176,72 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 All Orders", callback_data="all_orders")],
         [InlineKeyboardButton("⏳ Pending Orders", callback_data="pending_orders")],
         [InlineKeyboardButton("✅ Completed Orders", callback_data="completed_orders")],
+        [InlineKeyboardButton("🙅 Banned Users", callback_data="banned_users")],
     ]
     await query.message.reply_text("⚙️ Admin Panel:", reply_markup=InlineKeyboardMarkup(kb))
 
-async def all_orders_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---- Admin: Manage Orders ----
+async def complete_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    oid = int(query.data.split("_", 1)[1])
+    data = load_data()
+    order = next((o for o in data["orders"] if o["id"] == oid), None)
+    if not order:
+        await query.message.reply_text("❌ Order not found.")
+        return
+    order["status"] = "completed"
+    save_data(data)
+    try:
+        await context.bot.send_message(order["user_id"], f"✅ Your order #{oid} has been marked completed by Admin.")
+    except:
+        pass
+    await query.message.reply_text(f"✅ Order #{oid} marked as completed.")
+
+async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = int(query.data.split("_", 1)[1])
+    data = load_data()
+    if uid not in data["banned"]:
+        data["banned"].append(uid)
+        save_data(data)
+    await query.message.reply_text(f"🚫 User {uid} banned.")
+
+async def show_banned(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = load_data()
-    if not data["orders"]:
-        await query.message.reply_text("No orders yet.")
+    banned = data.get("banned", [])
+    if not banned:
+        await query.message.reply_text("✅ No banned users.")
         return
-    for o in data["orders"]:
+    for uid in banned:
+        kb = [[InlineKeyboardButton("Unban", callback_data=f"unban_{uid}")]]
+        await query.message.reply_text(f"🚫 User ID: {uid}", reply_markup=InlineKeyboardMarkup(kb))
+
+async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = int(query.data.split("_", 1)[1])
+    data = load_data()
+    if uid in data["banned"]:
+        data["banned"].remove(uid)
+        save_data(data)
+    await query.message.reply_text(f"✅ User {uid} unbanned.")
+
+# ---- Admin: Orders ----
+async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, status=None):
+    query = update.callback_query
+    await query.answer()
+    data = load_data()
+    orders = data["orders"]
+    if status:
+        orders = [o for o in orders if o["status"] == status]
+    if not orders:
+        await query.message.reply_text("No orders found.")
+        return
+    for o in orders:
         prod = next((p for p in data["products"] if p["id"] == o["product_id"]), None)
         caption = (f"📦 Order #{o['id']} ({o['status']})\n👤 User id: {o['user_id']}\n"
                    f"Product: {prod['name'] if prod else 'unknown'}\n🔗 Link: {o.get('link','-')}")
@@ -203,15 +259,46 @@ def main():
     # Commands
     app.add_handler(CommandHandler("start", start))
 
-    # Callbacks
+    # Catalog
     app.add_handler(CallbackQueryHandler(catalog_callback, pattern="^catalog$"))
     app.add_handler(CallbackQueryHandler(buy_callback, pattern="^buy_"))
     app.add_handler(CallbackQueryHandler(pay_selected, pattern="^pay_"))
-    app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
-    app.add_handler(CallbackQueryHandler(all_orders_callback, pattern="^all_orders$"))
 
-    # Conversation
-    conv = ConversationHandler(
+    # Admin Panel
+    app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
+    app.add_handler(CallbackQueryHandler(lambda u,c: show_orders(u,c), pattern="^all_orders$"))
+    app.add_handler(CallbackQueryHandler(lambda u,c: show_orders(u,c,'pending'), pattern="^pending_orders$"))
+    app.add_handler(CallbackQueryHandler(lambda u,c: show_orders(u,c,'completed'), pattern="^completed_orders$"))
+    app.add_handler(CallbackQueryHandler(show_banned, pattern="^banned_users$"))
+    app.add_handler(CallbackQueryHandler(unban_user, pattern="^unban_"))
+    app.add_handler(CallbackQueryHandler(complete_order, pattern="^complete_"))
+    app.add_handler(CallbackQueryHandler(ban_user, pattern="^ban_"))
+
+    # Conversations (Add product, Add payment, Buy flow)
+    conv_prod = ConversationHandler(
+        entry_points=[CallbackQueryHandler(lambda u,c: None, pattern="^add_product$")],
+        states={
+            ADD_PROD_NAME: [MessageHandler(filters.TEXT, product_name)],
+            ADD_PROD_PRICE: [MessageHandler(filters.TEXT, product_price)],
+            ADD_PROD_DESC: [MessageHandler(filters.TEXT, product_desc)],
+            ADD_PROD_PHOTO: [MessageHandler(filters.PHOTO, product_photo)],
+        },
+        fallbacks=[]
+    )
+    app.add_handler(conv_prod)
+
+    conv_pay = ConversationHandler(
+        entry_points=[CallbackQueryHandler(lambda u,c: None, pattern="^add_payment$")],
+        states={
+            ADD_PAY_LABEL: [MessageHandler(filters.TEXT, payment_label)],
+            ADD_PAY_TYPE: [MessageHandler(filters.TEXT, payment_type),
+                           MessageHandler(filters.PHOTO, payment_content)],
+        },
+        fallbacks=[]
+    )
+    app.add_handler(conv_pay)
+
+    conv_buy = ConversationHandler(
         entry_points=[MessageHandler(filters.PHOTO & ~filters.COMMAND, receive_payment_proof)],
         states={
             AWAIT_PAYMENT_PROOF: [MessageHandler(filters.PHOTO, receive_payment_proof)],
@@ -219,7 +306,7 @@ def main():
         },
         fallbacks=[],
     )
-    app.add_handler(conv)
+    app.add_handler(conv_buy)
 
     print("🤖 Bot running...")
     app.run_polling()
