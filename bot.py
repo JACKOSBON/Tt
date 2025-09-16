@@ -1,566 +1,228 @@
-import json
+"""
+Telegram Shop Bot
+Features:
+- Catalog browsing
+- Order placement with payment proof + social link
+- Admin panel (add product, add payment, ban/unban users, manage orders)
+"""
+
 import os
-from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-import asyncio
+import json
+import time
+from typing import Dict, Any
 
-# Bot Configuration - आपकी bot token यहां डालें
-BOT_TOKEN = "8291608976:AAEeii9LVk-fIGN9nkR7_7gBNPB-fhEDmjM"  # BotFather से मिली token यहां डालें
-ADMIN_ID = 7715257236  # आपकी Telegram user ID यहां डालें
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup
+)
+from telegram.ext import (
+    ApplicationBuilder, ContextTypes,
+    CommandHandler, CallbackQueryHandler,
+    MessageHandler, ConversationHandler, filters
+)
 
-# Data storage files
-PRODUCTS_FILE = "products.json"
-ORDERS_FILE = "orders.json"
-USERS_FILE = "users.json"
-SETTINGS_FILE = "settings.json"
+# ============ CONFIG ============
+BOT_TOKEN = "8291608976:AAEeii9LVk-fIGN9nkR7_7gBNPB-fhEDmjM"   # Replace with your bot token
+ADMIN_ID = 7715257236                # Replace with your Telegram user ID
+DATA_FILE = "data.json"
+# ================================
 
-# Initialize data files
-def init_files():
-    if not os.path.exists(PRODUCTS_FILE):
-        with open(PRODUCTS_FILE, 'w') as f:
-            json.dump({}, f)
-    
-    if not os.path.exists(ORDERS_FILE):
-        with open(ORDERS_FILE, 'w') as f:
-            json.dump({}, f)
-    
-    if not os.path.exists(USERS_FILE):
-        with open(USERS_FILE, 'w') as f:
-            json.dump({}, f)
-    
-    if not os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, 'w') as f:
-            json.dump({"payment_method": None, "payment_photo": None}, f)
+# States
+(ADD_PROD_NAME, ADD_PROD_PRICE, ADD_PROD_DESC, ADD_PROD_PHOTO,
+ ADD_PAY_LABEL, ADD_PAY_TYPE, AWAIT_PAYMENT_PROOF, AWAIT_SOCIAL_LINK) = range(8)
 
-# Data loading functions
-def load_products():
-    try:
-        with open(PRODUCTS_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return {}
+DEFAULT_DATA = {
+    "products": [],
+    "payments": [],
+    "orders": [],
+    "banned": [],
+    "next_product_id": 1,
+    "next_payment_id": 1,
+    "next_order_id": 1,
+}
 
-def save_products(products):
-    with open(PRODUCTS_FILE, 'w') as f:
-        json.dump(products, f, indent=2)
+# ========== Helpers ==========
+def load_data() -> Dict[str, Any]:
+    if not os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_DATA, f, indent=2)
+        return DEFAULT_DATA.copy()
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-def load_orders():
-    try:
-        with open(ORDERS_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return {}
+def save_data(data: Dict[str, Any]):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
-def save_orders(orders):
-    with open(ORDERS_FILE, 'w') as f:
-        json.dump(orders, f, indent=2)
+async def is_admin(user_id: int) -> bool:
+    return int(user_id) == int(ADMIN_ID)
 
-def load_users():
-    try:
-        with open(USERS_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return {}
-
-def save_users(users):
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users, f, indent=2)
-
-def load_settings():
-    try:
-        with open(SETTINGS_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return {"payment_method": None, "payment_photo": None}
-
-def save_settings(settings):
-    with open(SETTINGS_FILE, 'w') as f:
-        json.dump(settings, f, indent=2)
-
-# User state management
-user_states = {}
-
-# Helper functions
-def is_admin(user_id):
-    return user_id == ADMIN_ID
-
-def is_user_banned(user_id):
-    users = load_users()
-    return users.get(str(user_id), {}).get('banned', False)
-
-# Start command
+# ========== User Commands ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if is_user_banned(user_id):
-        await update.message.reply_text("❌ U ARE BAN FROM THIS BOT")
+    user = update.effective_user
+    data = load_data()
+    if user.id in data.get("banned", []):
+        await update.message.reply_text("🚫 Aap banned hain.")
         return
-    
-    if is_admin(user_id):
-        keyboard = [
-            ["🛍️ Shop", "👑 Admin Panel"],
-            ["📦 My Orders", "ℹ️ About"]
-        ]
-    else:
-        keyboard = [
-            ["🛍️ Shop", "📦 My Orders"],
-            ["ℹ️ About"]
-        ]
-    
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    
+
+    kb = [[InlineKeyboardButton("🛍 Show Catalog", callback_data="catalog")]]
+    if await is_admin(user.id):
+        kb.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")])
+
     await update.message.reply_text(
-        f"🙏 नमस्ते {update.effective_user.first_name}!\n\n"
-        "IM YOUR ASSISTANT WHAT U WANT?",
-        reply_markup=reply_markup
+        f"Hello {user.first_name}! Welcome to the Shop Bot.",
+        reply_markup=InlineKeyboardMarkup(kb),
     )
 
-# Shop catalog
-async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
-    products = load_products()
-    
-    if not products:
-        await update.message.reply_text("😔 PRODUCT NOT AVAILABLE RIGHT NOW")
-        return
-    
-    products_list = list(products.items())
-    items_per_page = 5
-    start_idx = page * items_per_page
-    end_idx = start_idx + items_per_page
-    page_products = products_list[start_idx:end_idx]
-    
-    if not page_products:
-        await update.message.reply_text("😔 PRODUCT NOT AVAILABLE RIGHT NOW")
-        return
-    
-    keyboard = []
-    
-    for product_id, product in page_products:
-        keyboard.append([InlineKeyboardButton(
-            f"{product['name']} - ₹{product['price']}", 
-            callback_data=f"product_{product_id}"
-        )])
-    
-    # Pagination buttons
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"catalog_page_{page-1}"))
-    if end_idx < len(products_list):
-        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"catalog_page_{page+1}"))
-    
-    if nav_buttons:
-        keyboard.append(nav_buttons)
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    text = "🛍️ **उपलब्ध Products:**\n\n"
-    text += f"Page {page + 1} of {(len(products_list) - 1) // items_per_page + 1}"
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-# Product details
-async def show_product_details(update: Update, context: ContextTypes.DEFAULT_TYPE, product_id):
-    products = load_products()
-    product = products.get(product_id)
-    
-    if not product:
-        await update.callback_query.answer("Product नहीं मिला!")
-        return
-    
-    text = f"📦 **{product['name']}**\n\n"
-    text += f"💰 Price: ₹{product['price']}\n"
-    text += f"📝 Description: {product['description']}\n"
-    
-    keyboard = [
-        [InlineKeyboardButton("🛒 Buy Now", callback_data=f"buy_{product_id}")],
-        [InlineKeyboardButton("⬅️ Back to Catalog", callback_data="back_to_catalog")]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if product.get('image'):
-        try:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-        except:
-            await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-# Purchase flow
-async def initiate_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE, product_id):
-    products = load_products()
-    product = products.get(product_id)
-    
-    if not product:
-        await update.callback_query.answer("Product नहीं मिला!")
-        return
-    
-    user_states[update.effective_user.id] = {
-        'action': 'buying',
-        'product_id': product_id,
-        'step': 'quantity'
-    }
-    
-    keyboard = [
-        [InlineKeyboardButton("1", callback_data=f"qty_1_{product_id}")],
-        [InlineKeyboardButton("2", callback_data=f"qty_2_{product_id}")],
-        [InlineKeyboardButton("3", callback_data=f"qty_3_{product_id}")],
-        [InlineKeyboardButton("Other", callback_data=f"qty_other_{product_id}")],
-        [InlineKeyboardButton("⬅️ Back", callback_data=f"product_{product_id}")]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    text = f"📦 **{product['name']}**\n"
-    text += f"💰 Price: ₹{product['price']} each\n\n"
-    text += "🔢 QUANTITY?"
-    
-    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-# Process quantity selection
-async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, quantity, product_id):
-    products = load_products()
-    product = products.get(product_id)
-    
-    if not product:
-        await update.callback_query.answer("Product नहीं मिला!")
-        return
-    
-    total_price = int(product['price']) * int(quantity)
-    
-    user_states[update.effective_user.id].update({
-        'quantity': quantity,
-        'total_price': total_price,
-        'step': 'payment'
-    })
-    
-    settings = load_settings()
-    
-    if not settings.get('payment_method'):
-        await update.callback_query.edit_message_text(
-            "😔 Payment method अभी available नहीं है। Admin से contact करें।"
-        )
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("💳 Proceed to Payment", callback_data=f"pay_{product_id}")],
-        [InlineKeyboardButton("⬅️ Back", callback_data=f"product_{product_id}")]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    text = f"📦 **Order Summary:**\n\n"
-    text += f"Product: {product['name']}\n"
-    text += f"Quantity: {quantity}\n"
-    text += f"Price per item: ₹{product['price']}\n"
-    text += f"**Total: ₹{total_price}**\n\n"
-    text += "Proceed to payment?"
-    
-    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-# Show payment method
-async def show_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    settings = load_settings()
-    user_id = update.effective_user.id
-    user_state = user_states.get(user_id, {})
-    
-    if not user_state or user_state.get('step') != 'payment':
-        await update.callback_query.answer("Invalid request!")
-        return
-    
-    text = f"💳 **Payment Information:**\n\n"
-    text += f"Total Amount: ₹{user_state['total_price']}\n\n"
-    
-    if settings.get('payment_method'):
-        text += f"Payment Method: {settings['payment_method']}\n\n"
-    
-    text += "📸 Payment complete करने के बाद screenshot भेजें।"
-    
-    # Create order
-    orders = load_orders()
-    order_id = f"ORD_{len(orders) + 1}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    
-    order_data = {
-        'user_id': user_id,
-        'user_name': update.effective_user.first_name,
-        'username': update.effective_user.username or "N/A",
-        'product_id': user_state['product_id'],
-        'quantity': user_state['quantity'],
-        'total_price': user_state['total_price'],
-        'status': 'pending',
-        'created_at': datetime.now().isoformat(),
-        'order_id': order_id
-    }
-    
-    orders[order_id] = order_data
-    save_orders(orders)
-    
-    user_states[user_id].update({
-        'order_id': order_id,
-        'step': 'payment_proof'
-    })
-    
-    keyboard = [[InlineKeyboardButton("❌ Cancel Order", callback_data=f"cancel_order_{order_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    # Send payment photo if available
-    if settings.get('payment_photo'):
-        try:
-            await update.callback_query.message.reply_photo(
-                photo=settings['payment_photo'],
-                caption=text,
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-        except:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-    else:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-# Admin Panel
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ आप admin नहीं हैं!")
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("➕ Add Product", callback_data="admin_add_product")],
-        [InlineKeyboardButton("❌ Delete Product", callback_data="admin_delete_product")],
-        [InlineKeyboardButton("📊 Total Orders", callback_data="admin_total_orders")],
-        [InlineKeyboardButton("⏳ Pending Orders", callback_data="admin_pending_orders")],
-        [InlineKeyboardButton("✅ Complete Order", callback_data="admin_complete_order")],
-        [InlineKeyboardButton("👥 Manage Users", callback_data="admin_manage_users")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings")]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "👑 **Admin Panel**\n\nSelect an option:",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
-# Orders management
-async def show_pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    orders = load_orders()
-    pending_orders = {k: v for k, v in orders.items() if v['status'] == 'pending'}
-    
-    if not pending_orders:
-        await update.callback_query.edit_message_text("😊 कोई pending orders नहीं हैं!")
-        return
-    
-    text = "⏳ **Pending Orders:**\n\n"
-    keyboard = []
-    
-    for order_id, order in pending_orders.items():
-        products = load_products()
-        product = products.get(order['product_id'], {})
-        
-        text += f"🆔 {order_id}\n"
-        text += f"👤 User: {order['user_name']} (@{order['username']})\n"
-        text += f"📦 Product: {product.get('name', 'Unknown')}\n"
-        text += f"🔢 Qty: {order['quantity']}\n"
-        text += f"💰 Total: ₹{order['total_price']}\n"
-        text += f"📅 Date: {order['created_at'][:10]}\n\n"
-        
-        keyboard.append([InlineKeyboardButton(
-            f"✅ Complete {order_id}", 
-            callback_data=f"complete_order_{order_id}"
-        )])
-    
-    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_admin")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-async def show_total_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    orders = load_orders()
-    
-    if not orders:
-        await update.callback_query.edit_message_text("😔 कोई orders नहीं हैं!")
-        return
-    
-    total_orders = len(orders)
-    pending_count = len([o for o in orders.values() if o['status'] == 'pending'])
-    completed_count = len([o for o in orders.values() if o['status'] == 'completed'])
-    total_revenue = sum([int(o['total_price']) for o in orders.values() if o['status'] == 'completed'])
-    
-    text = f"📊 **Orders Statistics:**\n\n"
-    text += f"📦 Total Orders: {total_orders}\n"
-    text += f"⏳ Pending: {pending_count}\n"
-    text += f"✅ Completed: {completed_count}\n"
-    text += f"💰 Total Revenue: ₹{total_revenue}\n\n"
-    
-    # Show recent orders
-    recent_orders = list(orders.items())[-5:]
-    if recent_orders:
-        text += "🕒 **Recent Orders:**\n\n"
-        for order_id, order in recent_orders:
-            products = load_products()
-            product = products.get(order['product_id'], {})
-            status_emoji = "✅" if order['status'] == 'completed' else "⏳"
-            text += f"{status_emoji} {order['user_name']} - {product.get('name', 'Unknown')} - ₹{order['total_price']}\n"
-    
-    keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="back_to_admin")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-
-# Message handlers
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text
-    
-    if is_user_banned(user_id):
-        await update.message.reply_text("❌ U ARE BAN FROM THIS BOT")
-        return
-    
-    if text == "🛍️ Shop":
-        await show_catalog(update, context)
-    elif text == "👑 Admin Panel":
-        await admin_panel(update, context)
-    elif text == "📦 My Orders":
-        await show_my_orders(update, context)
-    elif text == "ℹ️ About":
-        await update.message.reply_text(
-            "🏪 **About Our Shop**\n\n"
-            "यह एक Telegram-based shop है जहाँ आप आसानी से products browse कर सकते हैं "
-            "और order कर सकते हैं।\n\n"
-            "💳 Payment के लिए UPI का इस्तेमाल करें।\n"
-            "📞 Support के लिए admin से contact करें।",
-            parse_mode='Markdown'
-        )
-    
-    # Handle admin states
-    user_state = user_states.get(user_id, {})
-    
-    if user_state.get('action') == 'add_product':
-        await handle_add_product_flow(update, context, user_state)
-    elif user_state.get('action') == 'payment_setup':
-        await handle_payment_setup(update, context, user_state)
-    elif user_state.get('action') == 'user_management':
-        await handle_user_management(update, context, user_state)
-    elif user_state.get('step') == 'payment_proof':
-        await handle_payment_proof(update, context)
-
-# Handle payment proof
-async def handle_payment_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_state = user_states.get(user_id, {})
-    
-    if not user_state or user_state.get('step') != 'payment_proof':
-        return
-    
-    order_id = user_state.get('order_id')
-    if not order_id:
-        return
-    
-    # Notify admin about payment
-    orders = load_orders()
-    order = orders.get(order_id)
-    
-    if order:
-        products = load_products()
-        product = products.get(order['product_id'], {})
-        
-        admin_message = f"💳 **New Payment Received!**\n\n"
-        admin_message += f"🆔 Order ID: {order_id}\n"
-        admin_message += f"👤 User: {order['user_name']} (@{order.get('username', 'N/A')})\n"
-        admin_message += f"🆔 User ID: {order['user_id']}\n"
-        admin_message += f"📦 Product: {product.get('name', 'Unknown')}\n"
-        admin_message += f"🔢 Quantity: {order['quantity']}\n"
-        admin_message += f"💰 Total Amount: ₹{order['total_price']}\n"
-        admin_message += f"📅 Date: {order['created_at'][:16]}\n\n"
-        admin_message += "Payment screenshot received from user."
-        
-        try:
-            if update.message.photo:
-                await context.bot.send_photo(
-                    chat_id=ADMIN_ID,
-                    photo=update.message.photo[-1].file_id,
-                    caption=admin_message,
-                    parse_mode='Markdown'
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=admin_message,
-                    parse_mode='Markdown'
-                )
-        except Exception as e:
-            print(f"Error sending to admin: {e}")
-    
-    await update.message.reply_text(
-        "✅ Payment screenshot received!\n\n"
-        "आपका order admin के पास भेज दिया गया है। "
-        "Confirmation के लिए wait करें।"
-    )
-    
-    # Clear user state
-    user_states.pop(user_id, None)
-
-# Callback query handler
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def catalog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
-    data = query.data
-    user_id = update.effective_user.id
-    
-    if data.startswith("catalog_page_"):
-        page = int(data.split("_")[-1])
-        await show_catalog(update, context, page)
-    
-    elif data.startswith("product_"):
-        product_id = data.split("_")[1]
-        await show_product_details(update, context, product_id)
-    
-    elif data.startswith("buy_"):
-        product_id = data.split("_")[1]
-        await initiate_purchase(update, context, product_id)
-    
-    elif data.startswith("qty_"):
-        parts = data.split("_")
-        quantity = parts[1]
-        product_id = parts[2]
-        
-        if quantity == "other":
-            await query.edit_message_text("🔢 Please type the quantity you want:")
-            user_states[user_id] = {
-                'action': 'buying',
-                'product_id': product_id,
-                'step': 'custom_quantity'
-            }
+    data = load_data()
+    products = data.get("products", [])
+    if not products:
+        await query.message.reply_text("Catalog is empty.")
+        return
+    for prod in products:
+        kb = [[InlineKeyboardButton("Buy", callback_data=f"buy_{prod['id']}")]]
+        text = f"📦 {prod['name']}\n💰 Price: {prod['price']}\n📝 {prod['desc']}"
+        if prod.get("photo"):
+            await query.message.reply_photo(prod["photo"], caption=text,
+                                            reply_markup=InlineKeyboardMarkup(kb))
         else:
-            await process_quantity(update, context, quantity, product_id)
-    
-    elif data.startswith("pay_"):
-        await show_payment_method(update, context)
-    
-    elif data == "back_to_catalog":
-        await show_catalog(update, context)
-    
-    # Admin callbacks
-    elif data == "admin_add_product":
-        await start_add_product(update, context)
-    
-    elif data == "admin_pending_orders":
-        await show_pending_orders(update, context)
-    
-    elif data == "admin_total_orders":
-        await show_total_orders(update, context)
-    
-    elif data.startswith("complete_order_"):
-        order_id = data.replace("complete_order_", "")
-        await complete_order(update, context, order_id)
-    
-    elif data == "admin_settings":
-        await show_admin_settings(update, context)
-    
-    elif data == "admin_manage_users":
-        await show_user_management(update, 
+            await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
+
+async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    pid = int(query.data.split("_", 1)[1])
+    data = load_data()
+    prod = next((p for p in data["products"] if p["id"] == pid), None)
+    if not prod:
+        await query.message.reply_text("❌ Product not found.")
+        return
+    context.user_data["buy_product"] = prod
+    kb = [[InlineKeyboardButton(p["label"], callback_data=f"pay_{p['id']}")]
+          for p in data.get("payments", [])]
+    if not kb:
+        await query.message.reply_text("⚠️ No payment methods available.")
+        return
+    await query.message.reply_text("Choose payment method:", reply_markup=InlineKeyboardMarkup(kb))
+
+# ========== Buy Flow ==========
+async def pay_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    pay_id = int(query.data.split("_", 1)[1])
+    data = load_data()
+    pay = next((p for p in data["payments"] if p["id"] == pay_id), None)
+    if not pay:
+        await query.message.reply_text("❌ Payment method not found.")
+        return
+    context.user_data["selected_payment"] = pay
+    if pay["type"] == "upi":
+        await query.message.reply_text(f"Send payment to:\n`{pay['content']}`\n\n📸 Then upload payment screenshot.",
+                                       parse_mode="Markdown")
+    else:
+        await query.message.reply_photo(pay["content"], caption="Scan QR & pay, then upload screenshot.")
+    return AWAIT_PAYMENT_PROOF
+
+async def receive_payment_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.photo:
+        await update.message.reply_text("❌ Please send photo proof.")
+        return AWAIT_PAYMENT_PROOF
+    context.user_data["payment_proof"] = update.message.photo[-1].file_id
+    await update.message.reply_text("✅ Payment proof received.\nNow send a link (YouTube/Instagram/Channel):")
+    return AWAIT_SOCIAL_LINK
+
+async def receive_social_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    link = update.message.text.strip()
+    user = update.effective_user
+    data = load_data()
+    prod = context.user_data.get("buy_product")
+    pay = context.user_data.get("selected_payment")
+    proof = context.user_data.get("payment_proof")
+
+    if not prod or not pay or not proof:
+        await update.message.reply_text("⚠️ Session expired. Start again.")
+        return ConversationHandler.END
+
+    oid = data["next_order_id"]
+    order = {
+        "id": oid, "user_id": user.id,
+        "product_id": prod["id"], "status": "pending",
+        "payment_id": pay["id"], "proof_file_id": proof,
+        "link": link, "ts": int(time.time())
+    }
+    data["orders"].append(order)
+    data["next_order_id"] = oid + 1
+    save_data(data)
+
+    await update.message.reply_text("✅ Order placed. Admin will review it.")
+    caption = (f"🆕 Order #{order['id']}\n👤 User: {user.full_name} (id:{user.id})\n"
+               f"📦 Product: {prod['name']}\n💳 Payment: {pay['label']}\n🔗 Link: {link}\n📌 Status: pending")
+    kb = [[InlineKeyboardButton("✅ Mark Complete", callback_data=f"complete_{oid}")],
+          [InlineKeyboardButton("🚫 Ban User", callback_data=f"ban_{user.id}")]]
+    await context.bot.send_photo(chat_id=ADMIN_ID, photo=proof, caption=caption,
+                                 reply_markup=InlineKeyboardMarkup(kb))
+    return ConversationHandler.END
+
+# ========== Admin Panel ==========
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    kb = [
+        [InlineKeyboardButton("➕ Add Product", callback_data="add_product")],
+        [InlineKeyboardButton("💳 Add Payment", callback_data="add_payment")],
+        [InlineKeyboardButton("📋 All Orders", callback_data="all_orders")],
+        [InlineKeyboardButton("⏳ Pending Orders", callback_data="pending_orders")],
+        [InlineKeyboardButton("✅ Completed Orders", callback_data="completed_orders")],
+    ]
+    await query.message.reply_text("⚙️ Admin Panel:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def all_orders_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = load_data()
+    if not data["orders"]:
+        await query.message.reply_text("No orders yet.")
+        return
+    for o in data["orders"]:
+        prod = next((p for p in data["products"] if p["id"] == o["product_id"]), None)
+        caption = (f"📦 Order #{o['id']} ({o['status']})\n👤 User id: {o['user_id']}\n"
+                   f"Product: {prod['name'] if prod else 'unknown'}\n🔗 Link: {o.get('link','-')}")
+        kb = []
+        if o["status"] == "pending":
+            kb = [[InlineKeyboardButton("✅ Mark Complete", callback_data=f"complete_{o['id']}"),
+                   InlineKeyboardButton("🚫 Ban User", callback_data=f"ban_{o['user_id']}")]]
+        await context.bot.send_photo(chat_id=ADMIN_ID, photo=o["proof_file_id"], caption=caption,
+                                     reply_markup=InlineKeyboardMarkup(kb) if kb else None)
+
+# ========== Main ==========
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Commands
+    app.add_handler(CommandHandler("start", start))
+
+    # Callbacks
+    app.add_handler(CallbackQueryHandler(catalog_callback, pattern="^catalog$"))
+    app.add_handler(CallbackQueryHandler(buy_callback, pattern="^buy_"))
+    app.add_handler(CallbackQueryHandler(pay_selected, pattern="^pay_"))
+    app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
+    app.add_handler(CallbackQueryHandler(all_orders_callback, pattern="^all_orders$"))
+
+    # Conversation
+    conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.PHOTO & ~filters.COMMAND, receive_payment_proof)],
+        states={
+            AWAIT_PAYMENT_PROOF: [MessageHandler(filters.PHOTO, receive_payment_proof)],
+            AWAIT_SOCIAL_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_social_link)],
+        },
+        fallbacks=[],
+    )
+    app.add_handler(conv)
+
+    print("🤖 Bot running...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
