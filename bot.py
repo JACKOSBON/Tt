@@ -33,6 +33,9 @@ ADMIN_PASS = "KTATZ"  # Aap apna password set karen
 # Bot token
 TOKEN = "8291608976:AAEeii9LVk-fIGN9nkR7_7gBNPB-fhEDmjM"  # Aapka bot token
 
+# Global application instance
+application = None
+
 # Database initialization
 def init_database():
     conn = sqlite3.connect(DB_NAME)
@@ -212,13 +215,12 @@ async def set_password(update: Update, context: CallbackContext) -> None:
         
         # Send notification to admin
         try:
-            app = Application.builder().token(TOKEN).build()
             user_info = f"🆕 New User Registration:\n\n👤 User: {first_name} {last_name}\n🔖 Username: @{username}\n🆔 User ID: {user_id}\n📝 Login ID: {user_input_id}"
             
             keyboard = [[f"verify_{user_id}", f"ban_{user_id}"]]
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
             
-            await app.bot.send_message(
+            await context.bot.send_message(
                 chat_id=ADMIN_ID,
                 text=user_info,
                 reply_markup=reply_markup
@@ -473,11 +475,10 @@ async def manage_users(update: Update, context: CallbackContext) -> int:
         
         # Notify the user
         try:
-            app = Application.builder().token(TOKEN).build()
             user_info = db_fetchone("SELECT first_name, login_id FROM users WHERE user_id = ?", (user_to_verify,))
             if user_info:
                 first_name, login_id = user_info
-                await app.bot.send_message(
+                await context.bot.send_message(
                     chat_id=user_to_verify,
                     text=f"✅ Your account has been verified! You can now use /login to access the bot."
                 )
@@ -497,6 +498,6 @@ async def manage_users(update: Update, context: CallbackContext) -> int:
         
         # Notify the user
         try:
-            app = Application.builder().token(TOKEN).build()
-            await app.bot.send_message(
-      
+            await context.bot.send_message(
+                chat_id=user_to_ban,
+                text="❌ Your account has been banned by admin. Please contact admin for mo
