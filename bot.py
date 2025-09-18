@@ -33,9 +33,6 @@ ADMIN_PASS = "KTATZ"  # Aap apna password set karen
 # Bot token
 TOKEN = "8291608976:AAEeii9LVk-fIGN9nkR7_7gBNPB-fhEDmjM"  # Aapka bot token
 
-# Global application instance
-application = None
-
 # Database initialization
 def init_database():
     conn = sqlite3.connect(DB_NAME)
@@ -500,4 +497,6 @@ async def manage_users(update: Update, context: CallbackContext) -> int:
         try:
             await context.bot.send_message(
                 chat_id=user_to_ban,
-                text="❌ Your account has been banned by admin. Please contact admin for mo
+                text="❌ Your account has been banned by admin. Please contact admin for more information."
+            )
+        except Exce
