@@ -1,3 +1,4 @@
+# corrected_bot.py
 import sqlite3
 import time
 from datetime import datetime
@@ -13,7 +14,6 @@ DB_PATH = "users.db"
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
 
-# ---- Database helpers ----
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -73,7 +73,6 @@ def count_users():
     return n
 
 
-# ---- Keyboards ----
 def admin_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("👥 Users Count", "📋 List Users")
@@ -82,7 +81,6 @@ def admin_keyboard():
     return markup
 
 
-# ---- Handlers ----
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     chat_id = message.chat.id
@@ -103,12 +101,11 @@ def handle_buttons(message):
     user_id = message.from_user.id
     text = message.text.strip()
 
-    # Only Admin can use buttons
     if user_id != ADMIN_ID:
         return
 
     if text == "👥 Users Count":
-        bot.send_message(chat_id, f"Total registered users: {count_users()}")
+        bot.send_message(chat_id, "Total registered users: {}".format(count_users()))
 
     elif text == "📋 List Users":
         conn = sqlite3.connect(DB_PATH)
@@ -119,8 +116,8 @@ def handle_buttons(message):
         if not rows:
             bot.send_message(chat_id, "No users yet.")
         else:
-            user_list = "\n".join([f"{cid} — @{uname or 'NA'}" for cid, uname in rows])
-            bot.send_message(chat_id, f"<b>Users List:</b>\n{user_list}")
+            user_list = "\n".join(["{} - @{}".format(cid, (uname or 'NA')) for cid, uname in rows])
+            bot.send_message(chat_id, "<b>Users List:</b>\n{}".format(user_list))
 
     elif text == "➕ Add User":
         msg = bot.send_message(chat_id, "✍️ Send the User's Chat ID to add:")
@@ -134,7 +131,6 @@ def handle_buttons(message):
         bot.send_message(chat_id, "Reply to the message you want to broadcast and type /broadcast")
 
 
-# ---- Functions ----
 def do_add_user(message):
     if message.from_user.id != ADMIN_ID:
         return
@@ -146,13 +142,13 @@ def do_add_user(message):
 
     success = add_user(chat_id)
     if success:
-        bot.send_message(ADMIN_ID, f"✅ User {chat_id} added successfully.")
+        bot.send_message(ADMIN_ID, "✅ User {} added successfully.".format(chat_id))
         try:
             bot.send_message(chat_id, "✅ Admin has registered you. You will now receive broadcasts.")
         except:
             pass
     else:
-        bot.send_message(ADMIN_ID, f"⚠️ User {chat_id} already exists or error occurred.")
+        bot.send_message(ADMIN_ID, "⚠️ User {} already exists or error occurred.".format(chat_id))
 
 
 def do_broadcast_text(message):
@@ -168,7 +164,7 @@ def do_broadcast_text(message):
         except:
             fail += 1
         time.sleep(0.05)
-    bot.send_message(ADMIN_ID, f"📢 Broadcast Done!\n✅ Success: {success}\n❌ Failed: {fail}")
+    bot.send_message(ADMIN_ID, "📢 Broadcast Done!\n✅ Success: {}\n❌ Failed: {}".format(success, fail))
 
 
 @bot.message_handler(commands=['broadcast'])
@@ -189,10 +185,9 @@ def handle_broadcast(message):
         except:
             fail += 1
         time.sleep(0.05)
-    bot.send_message(ADMIN_ID, f"📢 Broadcast Done!\n✅ Success: {success}\n❌ Failed: {fail}")
+    bot.send_message(ADMIN_ID, "📢 Broadcast Done!\n✅ Success: {}\n❌ Failed: {}".format(success, fail))
 
 
-# ---- Start Bot ----
 if __name__ == "__main__":
     init_db()
     print("Bot is running...")
