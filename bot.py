@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 DB_NAME = "telegram_bot.db"
 
 # Conversation states
-REGISTER, AUTHENTICATE, MAIN_MENU, ADMIN_MENU, BROADCAST_MESSAGE, BROADCAST_MEDIA = range(6)
+REGISTER, AUTHENTICATE, MAIN_MENU, ADMIN_MENU, BROADCAST_MESSAGE, BROADCAST_MEDIA, MANAGE_USERS = range(7)
 
 # Admin credentials
 ADMIN_ID = "7715257236"  # Aapki admin ID
@@ -45,8 +45,13 @@ def init_database():
         user_id TEXT UNIQUE,
         login_id TEXT UNIQUE,
         password TEXT,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
         registered_at TEXT,
-        is_active INTEGER DEFAULT 1
+        is_active INTEGER DEFAULT 0,
+        is_verified INTEGER DEFAULT 0,
+        is_banned INTEGER DEFAULT 0
     )
     ''')
     
@@ -73,8 +78,8 @@ def init_database():
     cursor.execute("SELECT * FROM users WHERE user_id = ?", (ADMIN_ID,))
     if not cursor.fetchone():
         cursor.execute(
-            "INSERT INTO users (user_id, login_id, password, registered_at, is_active) VALUES (?, ?, ?, ?, ?)",
-            (ADMIN_ID, "admin", ADMIN_PASS, datetime.datetime.now().isoformat(), 1)
+            "INSERT INTO users (user_id, login_id, password, username, first_name, is_active, is_verified) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ADMIN_ID, "admin", ADMIN_PASS, "Admin", "Admin", 1, 1)
         )
     
     # Insert some initial user IDs if table is empty
@@ -113,10 +118,13 @@ def db_fetchall(query, params=()):
 
 async def start(update: Update, context: CallbackContext) -> int:
     user_id = str(update.effective_user.id)
+    username = update.effective_user.username or "N/A"
+    first_name = update.effective_user.first_name or "N/A"
+    last_name = update.effective_user.last_name or "N/A"
     
     # Check if user is admin
     if user_id == ADMIN_ID:
-        keyboard = [["📢 Broadcast Message", "👥 Total Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
+        keyboard = [["📢 Broadcast Message", "👥 Manage Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
         await update.message.reply_text(
             "🌟 Admin Panel 🌟\nPlease choose an option:",
@@ -124,15 +132,32 @@ async def start(update: Update, context: CallbackContext) -> int:
         )
         return ADMIN_MENU
     
+    # Check if user is banned
+    banned_user = db_fetchone("SELECT * FROM users WHERE user_id = ? AND is_banned = 1", (user_id,))
+    if banned_user:
+        await update.message.reply_text(
+            "❌ Your account has been banned. Please contact admin for more information.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    
     # Check if regular user exists
     user = db_fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
     
     if user:
-        await update.message.reply_text(
-            "Welcome back! Please enter your password to continue:",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return AUTHENTICATE
+        # Check if user is verified
+        if user[9] == 0:  # is_verified field
+            await update.message.reply_text(
+                "⏳ Your account is pending verification. Please wait for admin approval.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return ConversationHandler.END
+        else:
+            await update.message.reply_text(
+                "Welcome back! Please enter your password to continue:",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return AUTHENTICATE
     else:
         await update.message.reply_text(
             "Welcome! You need to register first. Please enter the ID provided by admin:",
@@ -143,6 +168,9 @@ async def start(update: Update, context: CallbackContext) -> int:
 async def register(update: Update, context: CallbackContext) -> int:
     user_input = update.message.text
     user_id = str(update.effective_user.id)
+    username = update.effective_user.username or "N/A"
+    first_name = update.effective_user.first_name or "N/A"
+    last_name = update.effective_user.last_name or "N/A"
     
     # Check if the provided ID exists in admin's list
     user_data = db_fetchone("SELECT * FROM user_ids WHERE user_id = ?", (user_input,))
@@ -150,6 +178,9 @@ async def register(update: Update, context: CallbackContext) -> int:
     if user_data:
         # Store the user ID temporarily for password setup
         context.user_data["temp_id"] = user_input
+        context.user_data["username"] = username
+        context.user_data["first_name"] = first_name
+        context.user_data["last_name"] = last_name
         await update.message.reply_text(
             "✅ ID verified. Please set your password:",
             reply_markup=ReplyKeyboardRemove()
@@ -165,19 +196,38 @@ async def set_password(update: Update, context: CallbackContext) -> None:
     password = update.message.text
     user_input_id = context.user_data.get("temp_id")
     user_id = str(update.effective_user.id)
+    username = context.user_data.get("username")
+    first_name = context.user_data.get("first_name")
+    last_name = context.user_data.get("last_name")
     
     if user_input_id:
-        # Save user to database
+        # Save user to database (not verified yet)
         db_execute(
-            "INSERT INTO users (user_id, login_id, password, registered_at, is_active) VALUES (?, ?, ?, ?, ?)",
-            (user_id, user_input_id, password, datetime.datetime.now().isoformat(), 1)
+            "INSERT INTO users (user_id, login_id, password, username, first_name, last_name, registered_at, is_active, is_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, user_input_id, password, username, first_name, last_name, datetime.datetime.now().isoformat(), 0, 0)
         )
         
         # Remove the ID from admin's available IDs
         db_execute("DELETE FROM user_ids WHERE user_id = ?", (user_input_id,))
         
+        # Send notification to admin
+        try:
+            app = Application.builder().token(TOKEN).build()
+            user_info = f"🆕 New User Registration:\n\n👤 User: {first_name} {last_name}\n🔖 Username: @{username}\n🆔 User ID: {user_id}\n📝 Login ID: {user_input_id}"
+            
+            keyboard = [[f"verify_{user_id}", f"ban_{user_id}"]]
+            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+            
+            await app.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=user_info,
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error sending notification to admin: {e}")
+        
         await update.message.reply_text(
-            "✅ Registration successful! You can now use /login to access the bot.",
+            "✅ Registration successful! Your account is pending verification by admin. You will be notified once approved.",
             reply_markup=ReplyKeyboardRemove()
         )
         del context.user_data["temp_id"]
@@ -191,7 +241,7 @@ async def login(update: Update, context: CallbackContext) -> int:
     
     # Check if user is admin
     if user_id == ADMIN_ID:
-        keyboard = [["📢 Broadcast Message", "👥 Total Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
+        keyboard = [["📢 Broadcast Message", "👥 Manage Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
         await update.message.reply_text(
             "🌟 Admin Panel 🌟\nPlease choose an option:",
@@ -199,8 +249,17 @@ async def login(update: Update, context: CallbackContext) -> int:
         )
         return ADMIN_MENU
     
-    # Check if regular user exists
-    user = db_fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    # Check if user is banned
+    banned_user = db_fetchone("SELECT * FROM users WHERE user_id = ? AND is_banned = 1", (user_id,))
+    if banned_user:
+        await update.message.reply_text(
+            "❌ Your account has been banned. Please contact admin for more information.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    
+    # Check if regular user exists and is verified
+    user = db_fetchone("SELECT * FROM users WHERE user_id = ? AND is_verified = 1", (user_id,))
     
     if user:
         await update.message.reply_text(
@@ -209,16 +268,22 @@ async def login(update: Update, context: CallbackContext) -> int:
         )
         return AUTHENTICATE
     else:
-        await update.message.reply_text(
-            "You need to register first. Please use /start to begin registration."
-        )
+        user_exists = db_fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        if user_exists:
+            await update.message.reply_text(
+                "⏳ Your account is pending verification. Please wait for admin approval."
+            )
+        else:
+            await update.message.reply_text(
+                "You need to register first. Please use /start to begin registration."
+            )
         return ConversationHandler.END
 
 async def authenticate(update: Update, context: CallbackContext) -> int:
     password = update.message.text
     user_id = str(update.effective_user.id)
     
-    user = db_fetchone("SELECT * FROM users WHERE user_id = ? AND password = ?", (user_id, password))
+    user = db_fetchone("SELECT * FROM users WHERE user_id = ? AND password = ? AND is_verified = 1", (user_id, password))
     
     if user:
         keyboard = [["📺 View Content", "ℹ️ My Account"], ["🚪 Logout"]]
@@ -230,7 +295,7 @@ async def authenticate(update: Update, context: CallbackContext) -> int:
         return MAIN_MENU
     else:
         await update.message.reply_text(
-            "❌ Incorrect password. Please try again:"
+            "❌ Incorrect password or account not verified. Please try again:"
         )
         return AUTHENTICATE
 
@@ -275,11 +340,15 @@ async def main_menu(update: Update, context: CallbackContext) -> int:
         
     elif user_input == "ℹ️ My Account":
         user = db_fetchone("SELECT * FROM users WHERE user_id = ?", (user_id,))
-        user_id, login_id, password, registered_at, is_active = user
+        user_id_db, login_id, password, username, first_name, last_name, registered_at, is_active, is_verified, is_banned = user
         reg_date = datetime.datetime.fromisoformat(registered_at).strftime('%Y-%m-%d %H:%M')
         
+        status = "✅ Verified" if is_verified else "⏳ Pending Verification"
+        if is_banned:
+            status = "❌ Banned"
+            
         await update.message.reply_text(
-            f"📋 Your account info:\n\n🆔 ID: {login_id}\n📅 Registered: {reg_date}"
+            f"📋 Your account info:\n\n🆔 ID: {login_id}\n👤 Name: {first_name} {last_name}\n🔖 Username: @{username}\n📅 Registered: {reg_date}\n📊 Status: {status}"
         )
         
         keyboard = [["📺 View Content", "ℹ️ My Account"], ["🚪 Logout"]]
@@ -310,17 +379,34 @@ async def admin_menu(update: Update, context: CallbackContext) -> int:
         )
         return BROADCAST_MESSAGE
         
-    elif user_input == "👥 Total Users":
-        total_users = db_fetchone("SELECT COUNT(*) FROM users")[0]
-        await update.message.reply_text(f"📊 Total registered users: {total_users}")
+    elif user_input == "👥 Manage Users":
+        # Get pending users
+        pending_users = db_fetchall("SELECT user_id, login_id, username, first_name, last_name FROM users WHERE is_verified = 0 AND is_banned = 0")
         
-        keyboard = [["📢 Broadcast Message", "👥 Total Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
-        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-        await update.message.reply_text(
-            "Admin panel:",
-            reply_markup=reply_markup
-        )
-        return ADMIN_MENU
+        if pending_users:
+            users_text = "⏳ Pending Users:\n\n"
+            keyboard = []
+            
+            for user in pending_users:
+                user_id_db, login_id, username, first_name, last_name = user
+                users_text += f"👤 {first_name} {last_name} (@{username}) - ID: {login_id}\n"
+                keyboard.append([f"verify_{user_id_db}", f"ban_{user_id_db}"])
+            
+            keyboard.append(["↩️ Back"])
+            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+            
+            await update.message.reply_text(users_text, reply_markup=reply_markup)
+            return MANAGE_USERS
+        else:
+            total_users = db_fetchone("SELECT COUNT(*) FROM users WHERE is_verified = 1")[0]
+            banned_users = db_fetchone("SELECT COUNT(*) FROM users WHERE is_banned = 1")[0]
+            
+            users_text = f"📊 Users Statistics:\n\n✅ Verified Users: {total_users}\n⏳ Pending Users: 0\n❌ Banned Users: {banned_users}"
+            
+            keyboard = [["📢 Broadcast Message", "👥 Manage Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
+            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+            await update.message.reply_text(users_text, reply_markup=reply_markup)
+            return ADMIN_MENU
         
     elif user_input == "🆔 Generate User IDs":
         # Generate 5 new user IDs
@@ -333,7 +419,7 @@ async def admin_menu(update: Update, context: CallbackContext) -> int:
         id_list = "🆔 New User IDs generated:\n\n" + "\n".join(new_ids)
         await update.message.reply_text(id_list)
         
-        keyboard = [["📢 Broadcast Message", "👥 Total Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
+        keyboard = [["📢 Broadcast Message", "👥 Manage Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
         await update.message.reply_text(
             "Admin panel:",
@@ -342,21 +428,23 @@ async def admin_menu(update: Update, context: CallbackContext) -> int:
         return ADMIN_MENU
         
     elif user_input == "📊 Statistics":
-        total_users = db_fetchone("SELECT COUNT(*) FROM users")[0]
-        active_users = db_fetchone("SELECT COUNT(*) FROM users WHERE is_active = 1")[0]
+        total_users = db_fetchone("SELECT COUNT(*) FROM users WHERE is_verified = 1")[0]
+        pending_users = db_fetchone("SELECT COUNT(*) FROM users WHERE is_verified = 0 AND is_banned = 0")[0]
+        banned_users = db_fetchone("SELECT COUNT(*) FROM users WHERE is_banned = 1")[0]
         total_content = db_fetchone("SELECT COUNT(*) FROM content")[0]
         
         stats_text = f"""
         📊 Bot Statistics:
         
-        👥 Total Users: {total_users}
-        ✅ Active Users: {active_users}
+        ✅ Verified Users: {total_users}
+        ⏳ Pending Users: {pending_users}
+        ❌ Banned Users: {banned_users}
         📨 Total Content: {total_content}
         """
         
         await update.message.reply_text(stats_text)
         
-        keyboard = [["📢 Broadcast Message", "👥 Total Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
+        keyboard = [["📢 Broadcast Message", "👥 Manage Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
         await update.message.reply_text(
             "Admin panel:",
@@ -365,7 +453,7 @@ async def admin_menu(update: Update, context: CallbackContext) -> int:
         return ADMIN_MENU
         
     elif user_input == "↩️ Back":
-        keyboard = [["📢 Broadcast Message", "👥 Total Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
+        keyboard = [["📢 Broadcast Message", "👥 Manage Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
         reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
         await update.message.reply_text(
             "Admin panel:",
@@ -373,138 +461,42 @@ async def admin_menu(update: Update, context: CallbackContext) -> int:
         )
         return ADMIN_MENU
 
-async def broadcast_message(update: Update, context: CallbackContext) -> int:
+async def manage_users(update: Update, context: CallbackContext) -> int:
     user_input = update.message.text
     user_id = str(update.effective_user.id)
     
-    if user_input == "📝 Text Message":
-        await update.message.reply_text(
-            "Please send the text message you want to broadcast:",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        context.user_data["broadcast_type"] = "text"
-        return BROADCAST_MEDIA
+    if user_input.startswith("verify_"):
+        user_to_verify = user_input.split("_")[1]
         
-    elif user_input == "🖼️ Photo":
-        await update.message.reply_text(
-            "Please send the photo you want to broadcast:",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        context.user_data["broadcast_type"] = "photo"
-        return BROADCAST_MEDIA
+        # Verify the user
+        db_execute("UPDATE users SET is_verified = 1, is_active = 1 WHERE user_id = ?", (user_to_verify,))
         
-    elif user_input == "🎥 Video":
-        await update.message.reply_text(
-            "Please send the video you want to broadcast:",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        context.user_data["broadcast_type"] = "video"
-        return BROADCAST_MEDIA
-        
-    elif user_input == "↩️ Back":
-        keyboard = [["📢 Broadcast Message", "👥 Total Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
-        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-        await update.message.reply_text(
-            "Admin panel:",
-            reply_markup=reply_markup
-        )
-        return ADMIN_MENU
-
-async def broadcast_media(update: Update, context: CallbackContext) -> int:
-    user_id = str(update.effective_user.id)
-    broadcast_type = context.user_data.get("broadcast_type")
-    
-    # Check if message is text, photo, or video
-    if broadcast_type == "text" and update.message.text:
-        content_type = "text"
-        content_data = update.message.text
-    elif broadcast_type == "photo" and update.message.photo:
-        content_type = "photo"
-        content_data = update.message.photo[-1].file_id  # Get the highest resolution photo
-    elif broadcast_type == "video" and update.message.video:
-        content_type = "video"
-        content_data = update.message.video.file_id
-    else:
-        await update.message.reply_text("❌ Unsupported message type or format.")
-        keyboard = [["📢 Broadcast Message", "👥 Total Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
-        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-        await update.message.reply_text(
-            "Admin panel:",
-            reply_markup=reply_markup
-        )
-        return ADMIN_MENU
-    
-    # Save content to database
-    db_execute(
-        "INSERT INTO content (type, data, sent_by, sent_at) VALUES (?, ?, ?, ?)",
-        (content_type, content_data, user_id, datetime.datetime.now().isoformat())
-    )
-    
-    # Get all users
-    users = db_fetchall("SELECT user_id FROM users WHERE is_active = 1 AND user_id != ?", (ADMIN_ID,))
-    user_count = len(users)
-    
-    # Send to all users
-    success_count = 0
-    for user in users:
+        # Notify the user
         try:
-            if content_type == "text":
-                await context.bot.send_message(chat_id=user[0], text=content_data)
-            elif content_type == "photo":
-                await context.bot.send_photo(chat_id=user[0], photo=content_data)
-            elif content_type == "video":
-                await context.bot.send_video(chat_id=user[0], video=content_data)
-            success_count += 1
+            app = Application.builder().token(TOKEN).build()
+            user_info = db_fetchone("SELECT first_name, login_id FROM users WHERE user_id = ?", (user_to_verify,))
+            if user_info:
+                first_name, login_id = user_info
+                await app.bot.send_message(
+                    chat_id=user_to_verify,
+                    text=f"✅ Your account has been verified! You can now use /login to access the bot."
+                )
         except Exception as e:
-            logger.error(f"Failed to send message to user {user[0]}: {e}")
-    
-    await update.message.reply_text(f"✅ Message broadcasted to {success_count}/{user_count} users!")
-    
-    keyboard = [["📢 Broadcast Message", "👥 Total Users"], ["🆔 Generate User IDs", "📊 Statistics"]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    await update.message.reply_text(
-        "Admin panel:",
-        reply_markup=reply_markup
-    )
-    return ADMIN_MENU
-
-async def cancel(update: Update, context: CallbackContext) -> int:
-    await update.message.reply_text(
-        "Operation cancelled.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return ConversationHandler.END
-
-def main() -> None:
-    # Initialize database
-    init_database()
-    
-    # Create the Application and pass it your bot's token.
-    application = Application.builder().token(TOKEN).build()
-
-    # Add conversation handler with the states
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start), CommandHandler("login", login)],
-        states={
-            REGISTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, register)],
-            AUTHENTICATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, authenticate)],
-            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu)],
-            ADMIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu)],
-            BROADCAST_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_message)],
-            BROADCAST_MEDIA: [MessageHandler(filters.ALL & ~filters.COMMAND, broadcast_media)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    # Add handler for password setting (after registration)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_password), group=1)
-    
-    # Add conversation handler
-    application.add_handler(conv_handler)
-
-    # Start the Bot
-    print("Bot is starting...")
-    application.run_polling()
-
-if __name__ == "__main__":
-    main()
+            logger.error(f"Error notifying user: {e}")
+        
+        await update.message.reply_text(f"✅ User {user_to_verify} has been verified.")
+        
+        # Return to manage users
+        return await admin_menu(update, context)
+        
+    elif user_input.startswith("ban_"):
+        user_to_ban = user_input.split("_")[1]
+        
+        # Ban the user
+        db_execute("UPDATE users SET is_banned = 1, is_active = 0, is_verified = 0 WHERE user_id = ?", (user_to_ban,))
+        
+        # Notify the user
+        try:
+            app = Application.builder().token(TOKEN).build()
+            await app.bot.send_message(
+      
