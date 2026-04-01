@@ -1,30 +1,25 @@
-import instagrapi
+import os
+import time
 from datetime import date
 import schedule
-import time
-import json
-import os
-USERNAME = os.environ.get("USERNAME")
-PASSWORD = os.environ.get("PASSWORD")
+from instagrapi import Client
+
+USERNAME = os.environ.get("IG_USERNAME")
+PASSWORD = os.environ.get("IG_PASSWORD")
+
 SESSION_FILE = "session.json"
 
 def get_client():
-    cl = instagrapi.Client()
-    
-    # Purana session load karo agar available ho
+    cl = Client()
     if os.path.exists(SESSION_FILE):
         cl.load_settings(SESSION_FILE)
-        cl.login(USERNAME, PASSWORD)
-    else:
-        cl.login(USERNAME, PASSWORD)
-        cl.dump_settings(SESSION_FILE)  # Session save karo
-    
+    cl.login(USERNAME, PASSWORD)
+    cl.dump_settings(SESSION_FILE)
     return cl
 
 def update_bio():
     today = date.today()
     birthday = date(today.year, 7, 14)
-    
     if today > birthday:
         birthday = date(today.year + 1, 7, 14)
     
@@ -39,14 +34,14 @@ def update_bio():
     
     try:
         cl = get_client()
-        time.sleep(3)  # Suspicious activity se bachne ke liye delay
+        time.sleep(5)
         cl.account_edit(biography=bio_text)
         print(f"✅ Bio update hua: {bio_text}")
     except Exception as e:
         print(f"❌ Error: {e}")
 
 schedule.every().day.at("00:00").do(update_bio)
-update_bio()  # Abhi ek baar chalao
+update_bio()
 
 while True:
     schedule.run_pending()
