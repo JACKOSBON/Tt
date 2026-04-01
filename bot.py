@@ -4,9 +4,8 @@ import schedule
 import time
 import json
 import os
-
-USERNAME = "mxluv__"
-PASSWORD = "TAUSEEF07"
+USERNAME = os.environ.get("USERNAME")
+PASSWORD = os.environ.get("PASSWORD")
 SESSION_FILE = "session.json"
 
 def get_client():
