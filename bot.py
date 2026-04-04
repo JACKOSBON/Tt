@@ -1,10 +1,3 @@
-# “””
-
-# TELEGRAM BRIDGE BOT - RENDER DEPLOYMENT
-Flask + Webhook mode
-
-"""
-
 import os
 import json
 import logging
