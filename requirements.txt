@@ -1,7 +1,0 @@
-python-telegram-bot==20.3
-pymongo==4.6.3
-dnspython==2.6.1
-flask==3.0.3
-gunicorn==21.2.0
-httpx==0.24.1
-httpcore==0.17.3
